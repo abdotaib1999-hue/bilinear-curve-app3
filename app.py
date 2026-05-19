@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
 from scipy.interpolate import interp1d
 from scipy.integrate import trapezoid
+import io  # <-- NOUVEAU : Pour générer le fichier Excel en mémoire
 
 # ==============================================================================
 # CONFIGURATION DE LA PAGE STREAMLIT
@@ -19,9 +20,6 @@ st.set_page_config(
 # MODULE 0 — SÉCURISATION ET CHARGEMENT DES DONNÉES
 # ==============================================================================
 def charger_donnees(fichier_excel):
-    """
-    Lit le fichier Excel, nettoie les données (NaN, textes) et retourne les vecteurs (d, f).
-    """
     df = pd.read_excel(fichier_excel)
     
     col_d = [c for c in df.columns if str(c).lower().startswith('d')]
@@ -30,7 +28,6 @@ def charger_donnees(fichier_excel):
     if not col_d or not col_f:
         raise ValueError("Colonnes introuvables. Le fichier doit avoir une colonne commençant par 'd' et une par 'f'.")
 
-    # Nettoyage : conversion forcée en numérique (les textes deviennent NaN) puis suppression des NaN
     df_clean = pd.DataFrame()
     df_clean['d'] = pd.to_numeric(df[col_d[0]], errors='coerce')
     df_clean['f'] = pd.to_numeric(df[col_f[0]], errors='coerce')
@@ -42,18 +39,16 @@ def charger_donnees(fichier_excel):
     d = df_clean['d'].values
     f = df_clean['f'].values
 
-    # Tri croissant par déplacement
     idx = np.argsort(d)
     d, f = d[idx], f[idx]
 
-    # Supprimer les doublons en déplacement (requis par interp1d)
     d, uniq = np.unique(d, return_index=True)
     f = f[uniq]
 
     return d, f
 
 # ==============================================================================
-# MODULE 1 — LISSAGE SAVITZKY-GOLAY (Logique mathématique conservée)
+# MODULE 1 — LISSAGE SAVITZKY-GOLAY
 # ==============================================================================
 def lissage_donnees(d, f, window_length=None, polyorder=3):
     n = len(f)
@@ -69,7 +64,7 @@ def lissage_donnees(d, f, window_length=None, polyorder=3):
     return f_lisse
 
 # ==============================================================================
-# MODULE 2 — BILINÉARISATION EUROCODE 8 (Logique mathématique conservée)
+# MODULE 2 — BILINÉARISATION EUROCODE 8
 # ==============================================================================
 def bilinearisation_eurocode8(d, f_lisse):
     idx_max = np.argmax(f_lisse)
@@ -93,7 +88,7 @@ def bilinearisation_eurocode8(d, f_lisse):
     d_bilin = np.array([0.0, dy, d.max()])
     f_bilin = np.array([0.0, Vy, Vy])
     
-    mu = d_m / dy  # Calcul de la ductilité
+    mu = d_m / dy 
 
     return {
         "Ke": Ke, "Vy": Vy, "dy": dy, "d_m": d_m, "E_m": E_m,
@@ -102,7 +97,7 @@ def bilinearisation_eurocode8(d, f_lisse):
     }
 
 # ==============================================================================
-# MODULE 3 — BILINÉARISATION ASCE 41-23 (Logique mathématique conservée)
+# MODULE 3 — BILINÉARISATION ASCE 41-23
 # ==============================================================================
 def bilinearisation_asce41(d, f_lisse, delta_t=None, tol=1e-4, max_iter=300):
     f_de_d = interp1d(d, f_lisse, kind='linear', bounds_error=False, fill_value=(f_lisse[0], f_lisse[-1]))
@@ -116,7 +111,7 @@ def bilinearisation_asce41(d, f_lisse, delta_t=None, tol=1e-4, max_iter=300):
     f_uniq, idx_uniq = np.unique(f_mont, return_index=True)
     d_inv = interp1d(f_uniq, d_mont[idx_uniq], kind='linear', bounds_error=False, fill_value=(d_mont[0], d_mont[-1]))
 
-    if delta_t is None:
+    if delta_t is None or delta_t == 0.0:
         delta_t = d.max()
     Delta_d = min(delta_t, d_pic)
     Vd_cible = float(f_de_d(Delta_d))
@@ -144,9 +139,6 @@ def bilinearisation_asce41(d, f_lisse, delta_t=None, tol=1e-4, max_iter=300):
             converge = True
             break
         Vy = Vy_new
-
-    if not converge:
-        st.warning("⚠️ Attention : La méthode ASCE 41 n'a pas convergé.")
 
     F60_f = 0.60 * Vy
     Delta60_f = max(float(d_inv(F60_f)), d[1])
@@ -178,7 +170,7 @@ def bilinearisation_asce41(d, f_lisse, delta_t=None, tol=1e-4, max_iter=300):
     return {
         "Ke": Ke, "Vy": Vy, "dy": Delta_y, "Delta_d": Delta_d,
         "alpha1": alpha1, "alpha2": alpha2, "F60": F60_f, "Delta60": Delta60_f,
-        "d_bilin": d_bilin, "f_bilin": f_bilin, "mu": mu
+        "d_bilin": d_bilin, "f_bilin": f_bilin, "mu": mu, "converge": converge
     }
 
 # ==============================================================================
@@ -186,21 +178,16 @@ def bilinearisation_asce41(d, f_lisse, delta_t=None, tol=1e-4, max_iter=300):
 # ==============================================================================
 def tracer_graphique_publication(d, f_lisse, d_bilin, f_bilin, dy, Vy, dm, res_dict, methode="EC8"):
     fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Styles pour rapport académique
     plt.rcParams.update({'font.size': 12, 'font.family': 'sans-serif'})
     
-    # Lignes
     ax.plot(d, f_lisse, color='#1565C0', lw=2.5, label="Courbe lissée (Savgol)")
     
     label_bilin = f"Bilinéaire {methode}\n(Ke = {res_dict['Ke']:.1f}, μ = {res_dict['mu']:.2f})"
     ax.plot(d_bilin, f_bilin, color='#C62828', lw=2.5, ls='--', label=label_bilin)
     
-    # Marqueurs point de fluage
     ax.plot(dy, Vy, marker='o', markersize=10, markeredgecolor='black', markerfacecolor='#FFC107', 
             lw=0, label=f"Point de fluage (dy={dy:.2f})")
     
-    # Marqueur point ultime / cible
     if methode == "EC8":
         ax.plot(dm, Vy, marker='s', markersize=10, markeredgecolor='black', markerfacecolor='#4CAF50', 
                 lw=0, label=f"Point ultime (dm={dm:.2f})")
@@ -217,47 +204,74 @@ def tracer_graphique_publication(d, f_lisse, d_bilin, f_bilin, dy, Vy, dm, res_d
     return fig
 
 # ==============================================================================
+# MODULE 5 — CRÉATION DU FICHIER EXCEL (NOUVEAU)
+# ==============================================================================
+def generer_fichier_excel(res_ec8, res_asce, d, f_lisse):
+    """Génère un fichier Excel en mémoire avec plusieurs onglets pour l'export."""
+    output = io.BytesIO()
+    
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # Onglet 1 : KPIs (Indicateurs)
+        df_kpi = pd.DataFrame({
+            "Indicateurs": ["Raideur Initiale (Ke)", "Force de Fluage (Vy)", "Déplacement Élastique (dy)", "Ductilité (μ)"],
+            "Eurocode 8": [res_ec8['Ke'], res_ec8['Vy'], res_ec8['dy'], res_ec8['mu']],
+            "ASCE 41-23": [res_asce['Ke'], res_asce['Vy'], res_asce['dy'], res_asce['mu']]
+        })
+        df_kpi.to_excel(writer, sheet_name="Résumé KPIs", index=False)
+        
+        # Onglet 2 : Courbe EC8
+        df_ec8 = pd.DataFrame({"Déplacement_EC8": res_ec8["d_bilin"], "Force_EC8": res_ec8["f_bilin"]})
+        df_ec8.to_excel(writer, sheet_name="Bilinéaire_EC8", index=False)
+        
+        # Onglet 3 : Courbe ASCE
+        df_asce = pd.DataFrame({"Déplacement_ASCE": res_asce["d_bilin"], "Force_ASCE": res_asce["f_bilin"]})
+        df_asce.to_excel(writer, sheet_name="Bilinéaire_ASCE", index=False)
+        
+        # Onglet 4 : Courbe d'origine lissée
+        df_lisse = pd.DataFrame({"Déplacement_Lissé": d, "Force_Lissée": f_lisse})
+        df_lisse.to_excel(writer, sheet_name="Courbe_Lissée", index=False)
+
+    return output.getvalue()
+
+# ==============================================================================
 # INTERFACE UTILISATEUR STREAMLIT
 # ==============================================================================
 
 st.title("🏗️ Application de Bilinéarisation de la Courbe Pushover")
 
-# --- Volet Méthodologique ---
 with st.expander("📖 Guide méthodologique & Rappels théoriques"):
     st.markdown("""
-    **Principe Général** : La bilinéarisation consiste à remplacer la courbe de capacité réelle par une courbe idéalisée (souvent élasto-parfaitement plastique ou tri-linéaire) tout en conservant l'énergie dissipée par la structure.
+    **Principe Général** : La bilinéarisation consiste à remplacer la courbe de capacité réelle par une courbe idéalisée.
     
     **1. Eurocode 8 (Annexe B.3)** :
-    - Repose sur le principe de l'**équivalence des aires** (énergies de déformation égales) jusqu'au déplacement correspondant à la force maximale ($d_m$).
-    - Formule de la limite élastique : $d_y = 2 \\cdot (d_m - E_m / V_y)$
+    - Repose sur le principe de l'**équivalence des aires** jusqu'au déplacement correspondant à la force maximale ($d_m$).
     
     **2. ASCE 41-23 (§7.4.3.2.5)** :
     - Détermine la raideur initiale $K_e$ par une **sécante à 60%** de la force de plastification effective ($V_y$).
-    - Étant donné que $V_y$ dépend de $K_e$ et inversement, la méthode exige une **procédure itérative** convergeant vers l'égalité des aires.
+    - Procédure itérative convergeant vers l'égalité des aires.
     """)
 
 st.markdown("---")
 
 st.sidebar.header("📁 Importation des données")
 uploaded_file = st.sidebar.file_uploader("Chargez votre fichier Excel (d-f.xlsx)", type=["xlsx"])
-delta_t_input = st.sidebar.number_input("Déplacement cible (ASCE) - Laisser 0.0 pour automatique", value=0.0, step=1.0)
+delta_t_input = st.sidebar.number_input("Déplacement cible (ASCE) - Laisser 0.0 pour auto", value=0.0, step=1.0)
 
 if uploaded_file is not None:
     try:
-        # Traitement sécurisé
         d_brut, f_brut = charger_donnees(uploaded_file)
         f_lisse = lissage_donnees(d_brut, f_brut)
         
-        # Calculs
         res_ec8 = bilinearisation_eurocode8(d_brut, f_lisse)
         
         dt_val = delta_t_input if delta_t_input > 0 else None
         res_asce = bilinearisation_asce41(d_brut, f_lisse, delta_t=dt_val)
 
-        # Affichage des résultats par onglets
+        if not res_asce["converge"]:
+            st.warning("⚠️ Attention : La méthode ASCE 41 n'a pas convergé complètement, les résultats peuvent être approximatifs.")
+
         tab1, tab2 = st.tabs(["📘 Eurocode 8 (Élasto-Plastique)", "📗 ASCE 41-23 (Tri-linéaire)"])
 
-        # --- ONGLET EC8 ---
         with tab1:
             st.subheader("📊 Indicateurs de Performance - EC8")
             col1, col2, col3, col4 = st.columns(4)
@@ -266,13 +280,9 @@ if uploaded_file is not None:
             col3.metric("Dép. Élastique (dy)", f"{res_ec8['dy']:.2f}")
             col4.metric("Ductilité (μ)", f"{res_ec8['mu']:.2f}")
             
-            fig_ec8 = tracer_graphique_publication(
-                d_brut, f_lisse, res_ec8["d_bilin"], res_ec8["f_bilin"], 
-                res_ec8["dy"], res_ec8["Vy"], res_ec8["d_m"], res_ec8, "EC8"
-            )
+            fig_ec8 = tracer_graphique_publication(d_brut, f_lisse, res_ec8["d_bilin"], res_ec8["f_bilin"], res_ec8["dy"], res_ec8["Vy"], res_ec8["d_m"], res_ec8, "EC8")
             st.pyplot(fig_ec8)
 
-        # --- ONGLET ASCE 41 ---
         with tab2:
             st.subheader("📊 Indicateurs de Performance - ASCE 41-23")
             col1, col2, col3, col4 = st.columns(4)
@@ -281,18 +291,33 @@ if uploaded_file is not None:
             col3.metric("Pente Post-Yield (α1)", f"{res_asce['alpha1']:.4f}")
             col4.metric("Ductilité (μ)", f"{res_asce['mu']:.2f}")
             
-            fig_asce = tracer_graphique_publication(
-                d_brut, f_lisse, res_asce["d_bilin"], res_asce["f_bilin"], 
-                res_asce["dy"], res_asce["Vy"], res_asce["Delta_d"], res_asce, "ASCE 41"
-            )
+            fig_asce = tracer_graphique_publication(d_brut, f_lisse, res_asce["d_bilin"], res_asce["f_bilin"], res_asce["dy"], res_asce["Vy"], res_asce["Delta_d"], res_asce, "ASCE 41")
             st.pyplot(fig_asce)
 
-        st.success("✅ Calculs effectués avec succès ! Vous pouvez faire un clic droit sur les graphiques pour les enregistrer et les intégrer à votre mémoire.")
+        st.success("✅ Calculs effectués avec succès ! Vous pouvez télécharger les données ci-dessous.")
+
+        # --- NOUVEAU : BOUTON DE TÉLÉCHARGEMENT EXCEL ---
+        st.markdown("---")
+        st.subheader("📥 Exporter les résultats")
+        
+        # Génération du fichier Excel en mémoire
+        excel_data = generer_fichier_excel(res_ec8, res_asce, d_brut, f_lisse)
+        
+        # Bouton Streamlit
+        st.download_button(
+            label="📊 Télécharger les résultats en Excel",
+            data=excel_data,
+            file_name="Resultats_Bilinearisation.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Télécharge un fichier Excel contenant les indicateurs et les coordonnées des courbes bilinéaires."
+        )
 
     except Exception as e:
-        # Interception propre des erreurs pour éviter l'écran rouge Streamlit
-        st.error(f"❌ Une erreur est survenue lors du traitement des données. \n\n**Détail de l'erreur :** {str(e)}")
-        st.info("💡 **Conseil :** Vérifiez que votre fichier Excel contient bien une colonne commençant par 'd' (pour les déplacements) et une colonne commençant par 'f' (pour les forces), sans caractères spéciaux perturbants.")
+        st.error(f"❌ Une erreur est survenue lors du traitement. \n\n**Erreur :** {str(e)}")
 
 else:
-    st.info("👋 Bienvenue ! Veuillez charger un fichier Excel dans la barre latérale gauche pour commencer.")
+    st.info("👋 Bienvenue ! Veuillez charger un fichier Excel dans la barre latérale pour commencer.")
+
+ 
+    
+
