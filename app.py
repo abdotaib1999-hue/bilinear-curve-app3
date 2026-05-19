@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
 from scipy.interpolate import interp1d
 from scipy.integrate import trapezoid
-import io  # <-- NOUVEAU : Pour générer le fichier Excel en mémoire
+import io 
 
 # ==============================================================================
 # CONFIGURATION DE LA PAGE STREAMLIT
@@ -118,6 +118,10 @@ def bilinearisation_asce41(d, f_lisse, delta_t=None, tol=1e-4, max_iter=300):
 
     Vy = Vmax
     converge = False
+    
+    # Variables pour stocker l'énergie
+    E_reel_fin = 0
+    aire_BL_fin = 0
 
     for it in range(max_iter):
         F60 = 0.60 * Vy
@@ -137,6 +141,8 @@ def bilinearisation_asce41(d, f_lisse, delta_t=None, tol=1e-4, max_iter=300):
         if abs(Vy_new - Vy) < tol:
             Vy = Vy_new
             converge = True
+            E_reel_fin = E_reel
+            aire_BL_fin = aire_BL
             break
         Vy = Vy_new
 
@@ -166,11 +172,13 @@ def bilinearisation_asce41(d, f_lisse, delta_t=None, tol=1e-4, max_iter=300):
     f_bilin = np.array([0.0, Vy, Vd, seuil_degrad])
     
     mu = Delta_d / Delta_y
+    diff_pct = abs(E_reel_fin - aire_BL_fin) / max(E_reel_fin, 1e-10) * 100.0
 
     return {
         "Ke": Ke, "Vy": Vy, "dy": Delta_y, "Delta_d": Delta_d,
         "alpha1": alpha1, "alpha2": alpha2, "F60": F60_f, "Delta60": Delta60_f,
-        "d_bilin": d_bilin, "f_bilin": f_bilin, "mu": mu, "converge": converge
+        "d_bilin": d_bilin, "f_bilin": f_bilin, "mu": mu, "converge": converge,
+        "E_reel": E_reel_fin, "aire_BL": aire_BL_fin, "diff_pct": diff_pct
     }
 
 # ==============================================================================
@@ -204,32 +212,77 @@ def tracer_graphique_publication(d, f_lisse, d_bilin, f_bilin, dy, Vy, dm, res_d
     return fig
 
 # ==============================================================================
-# MODULE 5 — CRÉATION DU FICHIER EXCEL (NOUVEAU)
+# MODULE 5 — CRÉATION DU FICHIER EXCEL DETAILLÉ
 # ==============================================================================
 def generer_fichier_excel(res_ec8, res_asce, d, f_lisse):
-    """Génère un fichier Excel en mémoire avec plusieurs onglets pour l'export."""
+    """Génère un fichier Excel en mémoire avec des coordonnées claires et tous les détails."""
     output = io.BytesIO()
     
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # Onglet 1 : KPIs (Indicateurs)
+        
+        # 1. Onglet des Résultats et Paramètres
         df_kpi = pd.DataFrame({
-            "Indicateurs": ["Raideur Initiale (Ke)", "Force de Fluage (Vy)", "Déplacement Élastique (dy)", "Ductilité (μ)"],
-            "Eurocode 8": [res_ec8['Ke'], res_ec8['Vy'], res_ec8['dy'], res_ec8['mu']],
-            "ASCE 41-23": [res_asce['Ke'], res_asce['Vy'], res_asce['dy'], res_asce['mu']]
+            "Paramètres et Indicateurs": [
+                "Raideur Initiale (Ke)",
+                "Force de Plastification / Fluage (Vy)",
+                "Déplacement Élastique (dy)",
+                "Ductilité (μ)",
+                "Déplacement Max ou Cible (dm / Δd)",
+                "Pente Post-Yield Positive (α1)",
+                "Pente de Dégradation Négative (α2)",
+                "Énergie dissipée réelle (Aire sous la courbe)",
+                "Énergie courbe bilinéaire (Aire bilinéaire)",
+                "Marge d'erreur sur l'énergie (%)"
+            ],
+            "Eurocode 8": [
+                round(res_ec8['Ke'], 3),
+                round(res_ec8['Vy'], 3),
+                round(res_ec8['dy'], 3),
+                round(res_ec8['mu'], 3),
+                round(res_ec8['d_m'], 3),
+                "0.0 (Élasto-Plastique Parfait)",
+                "N/A",
+                round(res_ec8['E_m'], 3),
+                round(res_ec8['aire_bilin'], 3),
+                round(res_ec8['diff_pct'], 4)
+            ],
+            "ASCE 41-23": [
+                round(res_asce['Ke'], 3),
+                round(res_asce['Vy'], 3),
+                round(res_asce['dy'], 3),
+                round(res_asce['mu'], 3),
+                round(res_asce['Delta_d'], 3),
+                round(res_asce['alpha1'], 5),
+                round(res_asce['alpha2'], 5),
+                round(res_asce['E_reel'], 3),
+                round(res_asce['aire_BL'], 3),
+                round(res_asce['diff_pct'], 4)
+            ]
         })
-        df_kpi.to_excel(writer, sheet_name="Résumé KPIs", index=False)
+        df_kpi.to_excel(writer, sheet_name="Résultats Détaillés", index=False)
         
-        # Onglet 2 : Courbe EC8
-        df_ec8 = pd.DataFrame({"Déplacement_EC8": res_ec8["d_bilin"], "Force_EC8": res_ec8["f_bilin"]})
-        df_ec8.to_excel(writer, sheet_name="Bilinéaire_EC8", index=False)
+        # 2. Onglet Coordonnées EC8
+        df_ec8 = pd.DataFrame({
+            "Description du Point": ["Point 0 (Origine)", "Point 1 (Fluage effectif)", "Point 2 (Déplacement ultime)"],
+            "Déplacement d (mm)": res_ec8["d_bilin"],
+            "Force V (kN)": res_ec8["f_bilin"]
+        })
+        df_ec8.to_excel(writer, sheet_name="Coordonnées_EC8", index=False)
         
-        # Onglet 3 : Courbe ASCE
-        df_asce = pd.DataFrame({"Déplacement_ASCE": res_asce["d_bilin"], "Force_ASCE": res_asce["f_bilin"]})
-        df_asce.to_excel(writer, sheet_name="Bilinéaire_ASCE", index=False)
+        # 3. Onglet Coordonnées ASCE 41
+        df_asce = pd.DataFrame({
+            "Description du Point": ["Point 0 (Origine)", "Point 1 (Fluage effectif)", "Point 2 (Déplacement cible)", "Point 3 (Dégradation 60% Vy)"],
+            "Déplacement d (mm)": res_asce["d_bilin"],
+            "Force V (kN)": res_asce["f_bilin"]
+        })
+        df_asce.to_excel(writer, sheet_name="Coordonnées_ASCE", index=False)
         
-        # Onglet 4 : Courbe d'origine lissée
-        df_lisse = pd.DataFrame({"Déplacement_Lissé": d, "Force_Lissée": f_lisse})
-        df_lisse.to_excel(writer, sheet_name="Courbe_Lissée", index=False)
+        # 4. Onglet Courbe de Base Lissée
+        df_lisse = pd.DataFrame({
+            "Déplacement Brut/Lissé (mm)": d,
+            "Force Lissée (kN)": f_lisse
+        })
+        df_lisse.to_excel(writer, sheet_name="Courbe_Continue_Lissée", index=False)
 
     return output.getvalue()
 
@@ -296,20 +349,18 @@ if uploaded_file is not None:
 
         st.success("✅ Calculs effectués avec succès ! Vous pouvez télécharger les données ci-dessous.")
 
-        # --- NOUVEAU : BOUTON DE TÉLÉCHARGEMENT EXCEL ---
         st.markdown("---")
-        st.subheader("📥 Exporter les résultats")
+        st.subheader("📥 Exporter les résultats mathématiques et coordonnées")
         
-        # Génération du fichier Excel en mémoire
+        # Génération du fichier Excel 
         excel_data = generer_fichier_excel(res_ec8, res_asce, d_brut, f_lisse)
         
-        # Bouton Streamlit
         st.download_button(
-            label="📊 Télécharger les résultats en Excel",
+            label="📊 Télécharger les résultats en Excel (.xlsx)",
             data=excel_data,
-            file_name="Resultats_Bilinearisation.xlsx",
+            file_name="Resultats_Pushover_Bilinearises.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            help="Télécharge un fichier Excel contenant les indicateurs et les coordonnées des courbes bilinéaires."
+            help="Télécharge un fichier Excel contenant tous les indicateurs et les coordonnées exactes des points pour vos logiciels."
         )
 
     except Exception as e:
@@ -317,7 +368,3 @@ if uploaded_file is not None:
 
 else:
     st.info("👋 Bienvenue ! Veuillez charger un fichier Excel dans la barre latérale pour commencer.")
-
- 
-    
-
